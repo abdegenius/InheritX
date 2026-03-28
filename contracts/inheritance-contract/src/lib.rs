@@ -3477,6 +3477,5 @@ impl InheritanceContract {
     }
 }
 
-#[cfg(test)]
 mod message_test;
 mod test;
