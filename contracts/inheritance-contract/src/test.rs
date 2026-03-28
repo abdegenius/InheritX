@@ -4206,3 +4206,96 @@ fn test_finalized_version_is_immutable() {
     assert_eq!(ver_info.will_hash, will_hash);
     assert!(client.is_will_finalized(&plan_id, &version));
 }
+
+// --- Issue #360: Message Update Before Lock ---
+
+#[test]
+fn test_update_legacy_message_before_unlock() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token_id, _admin, owner) = setup_with_token_and_admin(&env);
+    let plan_id = create_plan_and_get_id(&env, &client, &token_id, &owner);
+
+    let original_hash = BytesN::from_array(&env, &[1u8; 32]);
+    let future_ts = env.ledger().timestamp() + 10_000;
+    let params = CreateLegacyMessageParams {
+        vault_id: plan_id,
+        message_hash: original_hash.clone(),
+        unlock_timestamp: future_ts,
+    };
+    let message_id = client.create_legacy_message(&owner, &params);
+
+    let updated_hash = BytesN::from_array(&env, &[2u8; 32]);
+    let new_unlock_ts = future_ts + 5_000;
+    let update_params = UpdateLegacyMessageParams {
+        message_id,
+        message_hash: updated_hash.clone(),
+        unlock_timestamp: new_unlock_ts,
+    };
+    client.update_legacy_message(&owner, &update_params);
+
+    let stored = client.get_legacy_message(&message_id).unwrap();
+    assert_eq!(stored.message_hash, updated_hash);
+    assert_eq!(stored.unlock_timestamp, new_unlock_ts);
+    assert!(!stored.is_unlocked);
+}
+
+#[test]
+fn test_update_legacy_message_rejected_after_unlock() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let (client, token_id, admin, owner) = setup_with_token_and_admin(&env);
+    let plan_id = create_plan_and_get_id(&env, &client, &token_id, &owner);
+
+    let hash = BytesN::from_array(&env, &[1u8; 32]);
+    let unlock_ts = env.ledger().timestamp() + 1_000;
+    let params = CreateLegacyMessageParams {
+        vault_id: plan_id,
+        message_hash: hash.clone(),
+        unlock_timestamp: unlock_ts,
+    };
+    let message_id = client.create_legacy_message(&owner, &params);
+
+    // Trigger inheritance to unlock all vault messages
+    client.trigger_inheritance(&admin, &plan_id);
+    client.unlock_messages_on_inheritance(&plan_id);
+
+    let stored = client.get_legacy_message(&message_id).unwrap();
+    assert!(stored.is_unlocked);
+
+    // Attempt update after unlock must fail
+    let update_params = UpdateLegacyMessageParams {
+        message_id,
+        message_hash: BytesN::from_array(&env, &[3u8; 32]),
+        unlock_timestamp: env.ledger().timestamp() + 10_000,
+    };
+    let result = client.try_update_legacy_message(&owner, &update_params);
+    assert_eq!(result, Err(Ok(InheritanceError::AlreadyClaimed)));
+}
+
+#[test]
+fn test_update_legacy_message_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token_id, _admin, owner) = setup_with_token_and_admin(&env);
+    let plan_id = create_plan_and_get_id(&env, &client, &token_id, &owner);
+
+    let hash = BytesN::from_array(&env, &[1u8; 32]);
+    let future_ts = env.ledger().timestamp() + 10_000;
+    let params = CreateLegacyMessageParams {
+        vault_id: plan_id,
+        message_hash: hash.clone(),
+        unlock_timestamp: future_ts,
+    };
+    let message_id = client.create_legacy_message(&owner, &params);
+
+    let stranger = Address::generate(&env);
+    let update_params = UpdateLegacyMessageParams {
+        message_id,
+        message_hash: BytesN::from_array(&env, &[9u8; 32]),
+        unlock_timestamp: future_ts,
+    };
+    let result = client.try_update_legacy_message(&stranger, &update_params);
+    assert_eq!(result, Err(Ok(InheritanceError::Unauthorized)));
+}
